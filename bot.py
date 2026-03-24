@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 
 from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat, Message, Update
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CallbackContext,
@@ -276,6 +277,35 @@ async def _send_admin_content_to_user(
     return None
 
 
+def _reactions_for_bot_api(new_reaction: tuple) -> list:
+    """Telegram allows bots at most one reaction per message (non-premium bot behavior)."""
+    rx = list(new_reaction)
+    return rx[:1] if rx else []
+
+
+async def _mirror_reaction(
+    bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    new_reaction: tuple,
+) -> None:
+    payload = _reactions_for_bot_api(new_reaction)
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=message_id,
+            reaction=payload,
+        )
+    except TelegramError as e:
+        logger.warning(
+            "set_message_reaction failed chat_id=%s message_id=%s: %s",
+            chat_id,
+            message_id,
+            e,
+        )
+
+
 async def on_reaction(update: Update, context: CallbackContext) -> None:
     settings = context.bot_data["settings"]
     db: Database = context.bot_data["db"]
@@ -284,32 +314,40 @@ async def on_reaction(update: Update, context: CallbackContext) -> None:
     if not reaction:
         return
 
+    # Avoid echo when our own mirroring triggers another reaction update.
+    if reaction.user and reaction.user.id == context.bot.id:
+        return
+
     tracked = db.find_outbound_message(
         chat_id=reaction.chat.id,
         message_id=reaction.message_id,
     )
-    if not tracked:
+    if tracked:
+        admin_msg_id = db.get_admin_message_for_outbound_dm(
+            user_id=int(tracked["user_id"]),
+            user_message_id=reaction.message_id,
+        )
+        if admin_msg_id is not None:
+            await _mirror_reaction(
+                context.bot,
+                chat_id=settings.admin_chat_id,
+                message_id=admin_msg_id,
+                new_reaction=reaction.new_reaction,
+            )
         return
 
-    old_reactions = {str(r) for r in reaction.old_reaction}
-    new_reactions = {str(r) for r in reaction.new_reaction}
-    added = sorted(new_reactions - old_reactions)
-    removed = sorted(old_reactions - new_reactions)
-    action_text = []
-    if added:
-        action_text.append(f"added: {', '.join(added)}")
-    if removed:
-        action_text.append(f"removed: {', '.join(removed)}")
-    if not action_text:
-        action_text.append("updated reaction")
+    if reaction.chat.id != settings.admin_chat_id:
+        return
 
-    await context.bot.send_message(
-        chat_id=settings.admin_chat_id,
-        text=(
-            f"[{tracked['anon_id']}] reacted to your reply\n"
-            f"Message ID: {reaction.message_id}\n"
-            f"{'; '.join(action_text)}"
-        ),
+    pair = db.get_user_dm_for_admin_forward(reaction.message_id)
+    if not pair:
+        return
+    user_id, user_message_id = pair
+    await _mirror_reaction(
+        context.bot,
+        chat_id=user_id,
+        message_id=user_message_id,
+        new_reaction=reaction.new_reaction,
     )
 
 

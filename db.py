@@ -195,6 +195,34 @@ class Database:
                 (chat_id, message_id),
             ).fetchone()
 
+    def get_admin_message_for_outbound_dm(
+        self, *, user_id: int, user_message_id: int
+    ) -> Optional[int]:
+        """admin_to_user link: bot DM message_id -> admin chat message_id."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT admin_message_id FROM message_links
+                WHERE user_id = ? AND user_message_id = ? AND direction = 'admin_to_user'
+                """,
+                (user_id, user_message_id),
+            ).fetchone()
+            return int(row["admin_message_id"]) if row else None
+
+    def get_user_dm_for_admin_forward(self, admin_message_id: int) -> Optional[tuple[int, int]]:
+        """user_to_admin link: forwarded message in admin chat -> user's private message."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT user_id, user_message_id FROM message_links
+                WHERE admin_message_id = ? AND direction = 'user_to_admin'
+                """,
+                (admin_message_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return (int(row["user_id"]), int(row["user_message_id"]))
+
     def stats(self) -> dict[str, int]:
         with self._connect() as conn:
             users_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
