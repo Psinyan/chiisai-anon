@@ -1,0 +1,9 @@
+services:
+  anon-bot:
+    build: .
+    container_name: chiisai-anon-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./bot_data.db:/app/bot_data.db
